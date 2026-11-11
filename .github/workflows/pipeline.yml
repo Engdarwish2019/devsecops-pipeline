@@ -1,0 +1,233 @@
+name: secure-pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/engdarwish2019/devsecops-pipeline
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # ---------------------------------------------------------------- stage 1: source
+  secrets:
+    name: Secrets (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install semgrep==1.185.0
+      - name: Semgrep scan
+        run: >-
+          semgrep scan --error --metrics=off
+          --config p/python --config p/owasp-top-ten --config p/dockerfile
+          --sarif --output semgrep.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  test:
+    name: Tests, lint, dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: app/requirements*.txt
+      - run: pip install -r app/requirements.txt -r app/requirements-dev.txt
+      - name: ruff
+        run: |
+          ruff check app
+          ruff format --check app
+      - name: pytest (coverage gate 90%)
+        run: pytest --cov=app --cov-report=term-missing --cov-fail-under=90
+      - name: pip-audit (SCA)
+        run: pip-audit -r app/requirements.txt --strict
+
+  config:
+    name: Dockerfile, Kubernetes and Falco checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: checkov (Kubernetes + Dockerfile)
+        run: |
+          pip install checkov==3.4.4
+          checkov -d . --framework kubernetes dockerfile --compact --quiet
+      - name: Validate Falco rules
+        run: >-
+          docker run --rm -v "$PWD/falco/rules:/rules:ro" --entrypoint falco
+          falcosecurity/falco-no-driver:0.39.2
+          -V /etc/falco/falco_rules.yaml -V /rules/demo-api-rules.yaml
+
+  # ---------------------------------------------------------------- stage 2: artifact
+  build:
+    name: Build, scan, DAST, sign
+    needs: [secrets, sast, test, config]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          provenance: false
+          tags: demo-api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy image scan (fail on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: demo-api:ci
+          format: sarif
+          output: trivy.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy.sarif
+          category: trivy
+
+      - name: SBOM (Syft, SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: demo-api:ci
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Start the app for DAST
+        run: |
+          docker run -d --name demo-api -p 8080:8080 --read-only --cap-drop ALL demo-api:ci
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8080/healthz && exit 0
+            sleep 1
+          done
+          docker logs demo-api
+          exit 1
+
+      - name: DAST (OWASP ZAP baseline)
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: http://localhost:8080
+          rules_file_name: .zap/rules.tsv
+          cmd_options: "-I"
+          fail_action: true
+          allow_issue_writing: false
+          artifact_name: zap-report
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Push
+        id: push
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          docker tag demo-api:ci "$IMAGE:main"
+          docker tag demo-api:ci "$IMAGE:sha-$short_sha"
+          docker push "$IMAGE:main"
+          docker push "$IMAGE:sha-$short_sha"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE:main" | cut -d@ -f2)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - uses: sigstore/cosign-installer@v3
+        if: steps.push.outcome == 'success'
+
+      - name: Sign the image and attach the SBOM (Cosign keyless, GitHub OIDC)
+        if: steps.push.outcome == 'success'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          cosign sign --yes "$IMAGE@$DIGEST"
+          cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$IMAGE@$DIGEST"
+
+      - name: Build provenance (SLSA, GitHub attestations)
+        if: steps.push.outcome == 'success'
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Verify what we just signed
+        if: steps.push.outcome == 'success'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          cosign verify "$IMAGE@$DIGEST" \
+            --certificate-identity-regexp "^https://github.com/Engdarwish2019/devsecops-pipeline/.github/workflows/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+          echo "Signature verified for $IMAGE@$DIGEST"
+
+  # ---------------------------------------------------------------- optional: Vault
+  vault-secrets:
+    name: Read a CI secret from Vault (OIDC)
+    if: vars.VAULT_ADDR != '' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ vars.VAULT_ADDR }}
+          method: jwt
+          role: ci
+          jwtGithubAudience: https://github.com/Engdarwish2019
+          secrets: |
+            secret/data/ci/devsecops-pipeline/deploy token | DEPLOY_TOKEN
+      - name: Use the secret without printing it
+        run: test -n "$DEPLOY_TOKEN" && echo "Vault secret received (${#DEPLOY_TOKEN} characters)"

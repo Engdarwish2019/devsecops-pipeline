@@ -1,0 +1,47 @@
+# Runtime detection for the demo-api workload. The image only ever runs uvicorn,
+# so anything else happening inside it is suspicious.
+
+- list: demo_api_allowed_processes
+  items: [uvicorn, python, python3]
+
+- macro: demo_api_container
+  condition: (container and k8s.ns.name = "demo-api")
+
+- rule: Shell spawned in demo-api
+  desc: A shell started inside the demo-api container. The service never needs one.
+  condition: spawned_process and demo_api_container and proc.name in (shell_binaries)
+  output: >
+    Shell started in demo-api (user=%user.name command=%proc.cmdline
+    pod=%k8s.pod.name container=%container.id image=%container.image.repository)
+  priority: WARNING
+  tags: [container, shell, mitre_execution]
+
+- rule: Unexpected process in demo-api
+  desc: Any process other than the Python server running in the demo-api container.
+  condition: >
+    spawned_process and demo_api_container
+    and not proc.name in (demo_api_allowed_processes)
+    and not proc.name in (shell_binaries)
+  output: >
+    Unexpected process in demo-api (command=%proc.cmdline parent=%proc.pname
+    pod=%k8s.pod.name image=%container.image.repository)
+  priority: NOTICE
+  tags: [container, process, mitre_execution]
+
+- rule: Package manager run in demo-api
+  desc: Installing software at runtime breaks immutability and is a common post-exploitation step.
+  condition: spawned_process and demo_api_container and proc.name in (apt, apt-get, dpkg, pip, pip3, apk, dnf, yum)
+  output: >
+    Package manager in demo-api (command=%proc.cmdline pod=%k8s.pod.name)
+  priority: ERROR
+  tags: [container, mitre_persistence]
+
+- rule: Outbound connection from demo-api
+  desc: The API only answers requests and talks to Vault. New outbound connections are unexpected.
+  condition: >
+    evt.type = connect and evt.dir = < and fd.typechar = 4 and fd.sip != "0.0.0.0"
+    and demo_api_container and not fd.sport = 8080 and not fd.sport = 8200 and not fd.sport = 53
+  output: >
+    Outbound connection from demo-api (connection=%fd.name pod=%k8s.pod.name command=%proc.cmdline)
+  priority: WARNING
+  tags: [container, network, mitre_command_and_control]

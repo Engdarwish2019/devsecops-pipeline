@@ -1,0 +1,9 @@
+# Helm values for falcosecurity/falco.
+driver:
+  kind: modern_ebpf
+falcosidekick:
+  enabled: true
+  config:
+    slack:
+      # Webhook comes from a Kubernetes Secret, never from this file.
+      webhookurl: ""
