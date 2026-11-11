@@ -1,12 +1,12 @@
 # syntax=docker/dockerfile:1
-FROM python:3.12-slim AS build
+FROM python:3.15-slim AS build
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /build
 COPY app/requirements.txt .
 RUN python -m venv /opt/venv \
  && /opt/venv/bin/pip install --no-cache-dir --require-virtualenv -r requirements.txt
 
-FROM python:3.12-slim
+FROM python:3.15-slim
 LABEL org.opencontainers.image.source="https://github.com/Engdarwish2019/devsecops-pipeline" \
       org.opencontainers.image.description="Demo API built by a secure supply chain pipeline" \
       org.opencontainers.image.licenses="MIT"
