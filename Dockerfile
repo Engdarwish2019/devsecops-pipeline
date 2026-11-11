@@ -4,7 +4,8 @@ ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /build
 COPY app/requirements.txt .
 RUN python -m venv /opt/venv \
- && /opt/venv/bin/pip install --no-cache-dir --require-virtualenv -r requirements.txt
+ && /opt/venv/bin/pip install --no-cache-dir --require-virtualenv -r requirements.txt \
+ && /opt/venv/bin/pip uninstall --yes --require-virtualenv pip
 
 FROM python:3.12-slim
 LABEL org.opencontainers.image.source="https://github.com/Engdarwish2019/devsecops-pipeline" \
@@ -13,7 +14,15 @@ LABEL org.opencontainers.image.source="https://github.com/Engdarwish2019/devseco
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
-RUN groupadd --gid 10001 app \
+# Debian security fixes often land before the next python:3.12-slim rebuild, and the
+# Trivy gate fails on any fixable HIGH/CRITICAL CVE, so apply them here. pip is removed
+# because nothing installs packages at runtime.
+# nosemgrep: dockerfile.best-practice.avoid-apt-get-upgrade.avoid-apt-get-upgrade
+RUN apt-get update \
+ && apt-get upgrade --yes --no-install-recommends \
+ && rm -rf /var/lib/apt/lists/* \
+ && PIP_ROOT_USER_ACTION=ignore /usr/local/bin/python -m pip uninstall --yes pip \
+ && groupadd --gid 10001 app \
  && useradd --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app
 COPY --from=build /opt/venv /opt/venv
 COPY --chown=root:root app /srv/app
