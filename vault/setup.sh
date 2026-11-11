@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Configure Vault for this project. Needs VAULT_ADDR and an admin token in the environment.
 #  - KV v2 secrets engine
-#  - Kubernetes auth: the demo-api service account reads its own config
+#  - Kubernetes auth: the demo-api service account reads its own config, and External
+#    Secrets (platform-gitops) reads platform secrets such as the Grafana admin login
 #  - JWT auth for GitHub Actions OIDC: CI reads secrets without any stored token
 set -euo pipefail
 
@@ -12,6 +13,7 @@ vault secrets enable -path=secret kv-v2 2>/dev/null || echo "kv-v2 already enabl
 
 vault policy write demo-api "$here/policies/demo-api.hcl"
 vault policy write ci "$here/policies/ci.hcl"
+vault policy write external-secrets "$here/policies/external-secrets.hcl"
 
 # Kubernetes auth (run from a machine whose kubeconfig points at the cluster)
 vault auth enable kubernetes 2>/dev/null || echo "kubernetes auth already enabled"
@@ -21,6 +23,11 @@ vault write auth/kubernetes/role/demo-api \
   bound_service_account_names=demo-api \
   bound_service_account_namespaces=demo-api \
   policies=demo-api \
+  ttl=1h
+vault write auth/kubernetes/role/external-secrets \
+  bound_service_account_names=external-secrets \
+  bound_service_account_namespaces=external-secrets \
+  policies=external-secrets \
   ttl=1h
 
 # GitHub Actions OIDC
@@ -42,5 +49,6 @@ vault write auth/jwt/role/ci - <<JSON
 }
 JSON
 
-echo "Vault configured. Store app config with:"
+echo "Vault configured. Store app config and the platform's Grafana login with:"
 echo "  vault kv put secret/demo-api/config database_url='postgres://...'"
+echo "  vault kv put secret/platform/grafana admin-user=admin admin-password=\"\$(openssl rand -base64 24)\""

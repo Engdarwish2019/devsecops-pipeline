@@ -56,11 +56,13 @@ from `permissions: contents: read` and only the build job gets write scopes.
 
 | Control | Where |
 |---|---|
-| Non-root (UID 10001), read-only root FS, no capabilities, seccomp `RuntimeDefault` | `Dockerfile`, `k8s/deployment.yaml` |
+| Non-root (UID 10001), read-only root FS, no capabilities, seccomp `RuntimeDefault`, Debian security updates applied at build, no package installer (pip removed) | `Dockerfile`, `k8s/deployment.yaml` |
 | Pod Security `restricted`, default-deny NetworkPolicy (DNS and Vault egress only) | `k8s/` |
 | Secrets injected by the Vault Agent, Kubernetes auth bound to the service account | `k8s/deployment.yaml`, `vault/` |
 | CI reads Vault through GitHub OIDC, bound to this repo and `main` | `vault/setup.sh`, `vault-secrets` job |
 | Runtime detection: shells, unexpected processes, package managers, outbound connections | `falco/rules/demo-api-rules.yaml` |
+| Prometheus `/metrics`: requests by route template and status, latency histogram. [platform-gitops](https://github.com/Engdarwish2019/platform-gitops) reads the canary's 5xx ratio from it before promoting a new version | `app/main.py` |
+| Two ways to deliver Vault secrets: the Agent injector here, and External Secrets for platform components in platform-gitops (`external-secrets` role, read-only on `secret/platform/*`) | `vault/` |
 
 The [threat model](docs/threat-model.md) maps each control to a STRIDE threat.
 

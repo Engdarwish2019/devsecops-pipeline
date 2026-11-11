@@ -2,12 +2,20 @@
 
 import os
 import threading
+import time
 from typing import Annotated
 
 from fastapi import FastAPI, HTTPException, Request, Response
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from pydantic import BaseModel, Field, StringConstraints
+from starlette.routing import Match
 
 APP_VERSION = os.getenv("APP_VERSION", "dev")
+
+# Labelled by route template ("/api/v1/items/{item_id}"), never by raw path, so label
+# cardinality stays fixed. Argo Rollouts reads the 5xx ratio of these during a canary.
+REQUESTS = Counter("http_requests_total", "HTTP requests handled.", ["method", "route", "status"])
+LATENCY = Histogram("http_request_duration_seconds", "HTTP request latency in seconds.", ["method", "route"])
 
 app = FastAPI(
     title="demo-api",
@@ -28,9 +36,25 @@ SECURITY_HEADERS = {
 }
 
 
+def route_template(request: Request) -> str:
+    for route in request.app.router.routes:
+        match, _ = route.matches(request.scope)
+        if match == Match.FULL:
+            return route.path
+    return "unmatched"
+
+
 @app.middleware("http")
-async def add_security_headers(request: Request, call_next) -> Response:
-    response = await call_next(request)
+async def add_security_headers_and_metrics(request: Request, call_next) -> Response:
+    route = route_template(request)
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        REQUESTS.labels(request.method, route, "500").inc()
+        raise
+    REQUESTS.labels(request.method, route, str(response.status_code)).inc()
+    LATENCY.labels(request.method, route).observe(time.perf_counter() - start)
     response.headers.update(SECURITY_HEADERS)
     return response
 
@@ -59,6 +83,11 @@ def root() -> dict[str, str]:
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+def metrics() -> Response:
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/api/v1/items")
