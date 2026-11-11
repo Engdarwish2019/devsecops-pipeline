@@ -196,7 +196,7 @@ jobs:
 
       - name: Build provenance (SLSA, GitHub attestations)
         if: steps.push.outcome == 'success'
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.push.outputs.digest }}
