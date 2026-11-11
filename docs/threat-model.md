@@ -7,7 +7,8 @@ container image, runtime secrets and the cluster.
 |---|---|---|
 | **Spoofing** | Someone pushes an image that looks like ours | Cosign keyless signature bound to this repo's workflow on `main`; Kyverno `verify-image-signatures` in [platform-gitops](https://github.com/Engdarwish2019/platform-gitops) rejects anything else |
 | **Tampering** | Image changed after the scan | Signing and SLSA provenance are tied to the **digest**; Kyverno pins tags to the verified digest at admission |
-| **Tampering** | Vulnerable dependency pulled in | `pip-audit`, Trivy image scan, pinned versions, Dependabot for pip, Docker and Actions |
+| **Tampering** | Vulnerable dependency pulled in | `pip-audit`, Trivy image scan, pinned versions, Dependabot for pip, Docker and Actions (7-day cooldown before a new release is proposed) |
+| **Tampering** | A third-party GitHub Action's tag is moved to malicious code | Every action is pinned to a full commit SHA (version kept as a comment for Dependabot); Semgrep fails the build on any mutable tag |
 | **Repudiation** | "Who built this?" | GitHub build provenance attestation and Rekor transparency log entries for every signature |
 | **Information disclosure** | Secrets committed or baked into the image | gitleaks on full history, no secrets in the image or in Kubernetes Secrets: Vault Agent injection with Kubernetes auth, CI reads Vault through OIDC |
 | **Information disclosure** | Server leaks stack details | No server header, API docs disabled, strict security headers, verified by ZAP |
